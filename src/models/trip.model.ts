@@ -18,6 +18,8 @@ const TripSchema = new Schema<ITrip>({
     enum: ['REQUESTED', 'ACCEPTED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'],
     default: 'REQUESTED'
   }
+}, {
+  timestamps: true
 });
 
 const Trip = model<ITrip>('Trip', TripSchema);

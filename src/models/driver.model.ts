@@ -1,14 +1,16 @@
 import { Schema, model, Document } from 'mongoose';
 
-// Interface para el sub-documento de punto geoespacial
+// La interface IPoint no cambia
 export interface IPoint extends Document {
   type: 'Point';
-  coordinates: [number, number]; // Formato [longitud, latitud]
+  coordinates: [number, number];
 }
 
-// Interface para el documento del Conductor
+// Actualizamos la interface del Conductor
 export interface IDriver extends Document {
   name: string;
+  email: string; // <-- AÑADIDO
+  password?: string; // <-- AÑADIDO (opcional por seguridad)
   location: IPoint;
   isAvailable: boolean;
 }
@@ -30,10 +32,22 @@ const DriverSchema = new Schema<IDriver>({
     type: String,
     required: true
   },
+  // --- CAMPOS AÑADIDOS ---
+  email: {
+    type: String,
+    required: true,
+    unique: true,
+    lowercase: true
+  },
+  password: {
+    type: String,
+    required: true,
+    select: false // No devolver la contraseña en las consultas por defecto
+  },
+  // --- FIN DE CAMPOS AÑADIDOS ---
   location: {
     type: PointSchema,
     required: true,
-    // ¡MUY IMPORTANTE! Creamos el índice geoespacial '2dsphere'.
     index: '2dsphere'
   },
   isAvailable: {
