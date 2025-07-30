@@ -22,9 +22,9 @@ const generateToken = (id: string, role: 'user' | 'driver') => {
  */
 router.post('/register/user', async (req: Request, res: Response) => {
     try {
-        const { name, email, password } = req.body;
+        const { name, email, password, phoneNumber } = req.body;
 
-        if (!name || !email || !password) {
+        if (!name || !email || !password || !phoneNumber) {
             return res.status(400).send({ error: 'Todos los campos son requeridos.' });
         }
 
@@ -40,7 +40,7 @@ router.post('/register/user', async (req: Request, res: Response) => {
         await user.save();
 
         const token = generateToken(user.id, 'user');
-        res.status(201).send({ token });
+        res.status(201).send({ token, role: 'user' });
 
     } catch (error: any) {
         res.status(500).send({ error: 'Error en el servidor al registrar usuario.' });
@@ -52,38 +52,36 @@ router.post('/register/user', async (req: Request, res: Response) => {
  * @desc    Registrar un nuevo conductor
  * @body    { "name": "string", "email": "string", "password": "string", "location": { "lat": number, "lng": number } }
  */
+// In your /register/driver endpoint
 router.post('/register/driver', async (req: Request, res: Response) => {
     try {
-        const { name, email, password, location } = req.body;
+        // Note: 'location' is removed from required fields
+        const { name, email, password, phoneNumber } = req.body;
 
-        if (!name || !email || !password || !location) {
-            return res.status(400).send({ error: 'Todos los campos son requeridos.' });
+        // Adjust the validation
+        if (!name || !email || !password || !phoneNumber) {
+            return res.status(400).send({ error: 'Todos los campos son requeridos.', data: req.body });
         }
 
-        let driver = await Driver.findOne({ email });
-        if (driver) {
-            return res.status(400).send({ error: 'El correo electrónico ya está en uso.' });
-        }
+        // ... existing logic to check for user, hash password ...
+         const salt = await bcrypt.genSalt(10);
+         const hashedPassword = await bcrypt.hash(password, salt);
 
-        const salt = await bcrypt.genSalt(10);
-        const hashedPassword = await bcrypt.hash(password, salt);
-
-        driver = new Driver({
-            name,
+        // Create the driver without a location initially
+        const driver = new Driver({
+            name: name, // Match frontend field name
             email,
             password: hashedPassword,
-            location: {
-                type: 'Point',
-                coordinates: [location.lng, location.lat]
-            }
+            phoneNumber, // Add this field
+            // Location is not set here
         });
         await driver.save();
 
         const token = generateToken(driver.id, 'driver');
-        res.status(201).send({ token });
+        res.status(201).send({ token, role: 'driver' });
 
     } catch (error: any) {
-        res.status(500).send({ error: 'Error en el servidor al registrar conductor.' });
+        res.status(500).send({ error: 'Error en el servidor al registrar conductor.', msg: error });
     }
 });
 
@@ -95,35 +93,42 @@ router.post('/register/driver', async (req: Request, res: Response) => {
  * @desc    Iniciar sesión para pasajeros o conductores
  * @body    { "email": "string", "password": "string", "role": "user" | "driver" }
  */
+// A better login endpoint
 router.post('/login', async (req: Request, res: Response) => {
     try {
-        const { email, password, role } = req.body;
+        const { email, password } = req.body; // No 'role' from the request
 
-        if (!email || !password || !role) {
-            return res.status(400).send({ error: 'Email, contraseña y rol son requeridos.' });
+        if (!email || !password) {
+            return res.status(400).send({ error: 'Email and password are required.' });
         }
 
-        let account: any;
-        if (role === 'driver') {
-            account = await Driver.findOne({ email }).select('+password');
-        } else {
-            account = await User.findOne({ email }).select('+password');
-        }
+        // 1. First, check if they are a regular user (rider)
+        let account = await User.findOne({ email }).select('+password');
+        let role = 'user'; // Assume 'user' role first
 
+        // 2. If not found as a user, check if they are a driver
         if (!account) {
-            return res.status(400).send({ error: 'Credenciales inválidas.' });
+            account = await Driver.findOne({ email }).select('+password');
+            role = 'driver'; // It's a driver account
         }
 
+        // 3. If not found in either collection, the credentials are bad
+        if (!account) {
+            return res.status(401).send({ error: 'Invalid credentials.' });
+        }
+
+        // 4. Now, compare the password for the found account
         const isMatch = await bcrypt.compare(password, account.password);
         if (!isMatch) {
-            return res.status(400).send({ error: 'Credenciales inválidas.' });
+            return res.status(401).send({ error: 'Invalid credentials.' });
         }
 
+        // 5. Generate a token with the role the backend discovered
         const token = generateToken(account.id, role);
-        res.status(200).send({ token });
+        res.status(200).send({ token, role }); // You can also send the role back
 
     } catch (error: any) {
-        res.status(500).send({ error: 'Error en el servidor al iniciar sesión.' });
+        res.status(500).send({ error: 'Server error during login.' });
     }
 });
 

@@ -1,0 +1,86 @@
+# load-test.yml
+config:
+  target: "http://localhost:3000"
+  phases:
+    - duration: 120
+      arrivalRate: 5
+      rampTo: 50
+      name: "Warm-up phase"
+    - duration: 300
+      arrivalRate: 50
+      name: "Sustained load phase"
+  # We remove the global payload from here.
+  socketio:
+    transports: ["websocket"]
+
+scenarios:
+  # Scenario for Drivers
+  - name: "A Driver's Journey"
+    weight: 3 # 30% of virtual users will be drivers
+    # This scenario will ONLY use users from drivers.csv
+    payload:
+      path: "drivers.csv"
+      fields:
+        - "email"
+        - "password"
+    flow:
+      - log: "Driver starting journey..."
+      - post:
+          url: "/api/auth/login"
+          json:
+            email: "{{ email }}"
+            password: "{{ password }}"
+          capture:
+            - json: "$.token"
+              as: "authToken"
+      
+      - socketio:
+          url: "/"
+          auth:
+            token: "{{ authToken }}"
+
+      - loop:
+          - emit:
+              channel: "update-location"
+              data:
+                lat: "{{ $randomFloat(6.21, 6.26) }}"
+                lng: "{{ $randomFloat(-75.6, -75.5) }}"
+          - think: 10
+        count: 18
+
+  # Scenario for Riders
+  - name: "A Rider requests a trip"
+    weight: 7 # 70% of virtual users will be riders
+    # This scenario will ONLY use users from riders.csv
+    payload:
+      path: "riders.csv"
+      fields:
+        - "email"
+        - "password"
+    flow:
+      - log: "Rider starting journey..."
+      - post:
+          url: "/api/auth/login"
+          json:
+            email: "{{ email }}"
+            password: "{{ password }}"
+          capture:
+            - json: "$.token"
+              as: "authToken"
+              
+      - think: 2
+
+      - post:
+          url: "/api/trips/request"
+          headers:
+            Authorization: "Bearer {{ authToken }}"
+          json:
+            pickupLocation:
+              type: "Point"
+              coordinates: [-75.5812, 6.2442]
+            dropoffLocation:
+              type: "Point"
+              coordinates: [-75.6, 6.25]
+            pickupName: "Parque Lleras"
+            destinationName: "Estadio"
+            userIndications: "Testing load"

@@ -1,18 +1,24 @@
 import { Schema, model, Document } from 'mongoose';
 
-// La interface IPoint no cambia
-export interface IPoint extends Document {
+// Interfaz para la estructura de un punto GeoJSON (no necesita extender Document)
+export interface IPoint {
   type: 'Point';
-  coordinates: [number, number];
+  coordinates: [number, number]; // [longitud, latitud]
 }
 
-// Actualizamos la interface del Conductor
+// Interfaz actualizada del Conductor
 export interface IDriver extends Document {
   name: string;
-  email: string; // <-- AÑADIDO
-  password?: string; // <-- AÑADIDO (opcional por seguridad)
-  location: IPoint;
+  email: string;
+  password?: string;
+  location?: IPoint;
   isAvailable: boolean;
+  socketId?: string; // <-- AÑADIDO: El eslabón clave para la comunicación en tiempo real
+  car?: { // Opcional: añade información del vehículo
+    model: string;
+    plate: string;
+    color: string;
+  };
 }
 
 const PointSchema = new Schema<IPoint>({
@@ -25,35 +31,46 @@ const PointSchema = new Schema<IPoint>({
     type: [Number],
     required: true
   }
-});
+}, { _id: false }); // No es necesario un _id para el subdocumento Point
 
 const DriverSchema = new Schema<IDriver>({
   name: {
     type: String,
-    required: true
+    required: [true, 'El nombre es obligatorio.']
   },
-  // --- CAMPOS AÑADIDOS ---
   email: {
     type: String,
-    required: true,
+    required: [true, 'El email es obligatorio.'],
     unique: true,
-    lowercase: true
+    lowercase: true,
+    index: true // Indexar email para búsquedas de login rápidas
   },
   password: {
     type: String,
-    required: true,
+    required: [true, 'La contraseña es obligatoria.'],
     select: false // No devolver la contraseña en las consultas por defecto
   },
-  // --- FIN DE CAMPOS AÑADIDOS ---
   location: {
     type: PointSchema,
-    required: true,
-    index: '2dsphere'
+    required: false,
+    index: '2dsphere' // Índice geoespacial para encontrar conductores cercanos
   },
   isAvailable: {
     type: Boolean,
-    default: true
+    default: false // Es más seguro que un conductor empiece como 'offline'
+  },
+  // --- CAMPO AÑADIDO ---
+  socketId: {
+    type: String,
+    required: false // No todos los conductores estarán conectados en todo momento
+  },
+  car: {
+    model: String,
+    plate: String,
+    color: String
   }
+}, {
+  timestamps: true
 });
 
 const Driver = model<IDriver>('Driver', DriverSchema);

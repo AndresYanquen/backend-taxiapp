@@ -1,0 +1,7 @@
+// users.csv
+email,password
+driver1@test.com,password123
+rider1@test.com,password123
+driver2@test.com,password123
+rider2@test.com,password123
+...etc
