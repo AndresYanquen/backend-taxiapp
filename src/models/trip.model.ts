@@ -68,7 +68,7 @@ const TripSchema = new Schema<ITrip>({
   },
   cancelledBy: {
   type: String,
-  enum: ['user', 'driver'],
+  enum: ['user', 'driver', 'platform'],
   },
   cancellationFee: {
     type: Number,

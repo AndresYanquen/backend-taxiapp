@@ -1,211 +1,135 @@
 import dotenv from 'dotenv';
-
 import express from 'express';
-
 import http from 'http';
-
 import { Server } from 'socket.io';
-
 import cors from 'cors';
-
-import jwt from 'jsonwebtoken'; // <-- 1. IMPORTANTE: Añadir JWT
-
-
-
-// Importaciones refactorizadas
-
+import jwt from 'jsonwebtoken';
 import { connectDB } from './config/database';
-
 import { createApiRoutes } from './routes/api.routes';
-
 import authRoutes from './routes/auth.routes';
+import Driver from './models/driver.model';
 
-import Driver from './models/driver.model'; // Asegúrate de que este modelo tenga el campo 'socketId'
-
-
-
-// Cargar variables de entorno
-
+// --- Environment and Database Setup ---
 dotenv.config();
-
-
-
-// Conectar a la base de datos ANTES de iniciar el servidor
-
 connectDB();
 
+// --- Security: Validate Environment Variables at Startup ---
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  console.error("FATAL ERROR: JWT_SECRET is not defined in .env file.");
+  process.exit(1); // Stop the server if the secret is missing
+}
 
+// --- Type Definition for JWT Payload ---
+interface JwtPayload {
+  id: string;
+  role: 'user' | 'driver';
+}
+const corsOptions = {
+  // Replace with your Vue app's actual URL
+  origin: '*', 
+  // Ensure PATCH and OPTIONS are included in the allowed methods
+  methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
+  // Ensure necessary headers are allowed
+  allowedHeaders: ['Content-Type', 'Authorization'],
+};
 
+// --- Express App and HTTP Server Setup ---
 const app = express();
-
 app.use(cors());
-
 app.use(express.json());
-
-
-
-// Registramos las rutas
-
 app.use('/api/auth', authRoutes);
-
-
+app.use(cors(corsOptions))
 
 const server = http.createServer(app);
 
+// --- Socket.IO Server Setup ---
 const io = new Server(server, {
-
-cors: {
-
-origin: "*",
-
-methods: ["GET", "POST"]
-
-}
-
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"]
+  }
 });
 
-
-
-// --- INICIO: Lógica de Autenticación de Socket y Gestión de socketId ---
-
-// En tu archivo index.ts
-
-
-
+// --- Main Socket Connection Handler ---
 io.on('connection', (socket) => {
+  console.log(`Socket connected: ${socket.id}`);
 
-console.log(`Socket conectado: ${socket.id}`);
+  try {
+    // 1. Authenticate the socket immediately
+    const token = socket.handshake.auth.token;
+    if (!token) {
+      console.log(`Socket ${socket.id} disconnected: No token provided.`);
+      return socket.disconnect();
+    }
+    const decoded = jwt.verify(token, JWT_SECRET) as JwtPayload;
 
+    console.log(`Socket ${socket.id} authenticated as ${decoded.role} [${decoded.id}]`);
 
+    // 2. Register event listeners AFTER successful authentication
+    if (decoded.role === 'driver') {
+      const driverId = decoded.id;
 
-socket.on('joinRideRoom', (tripId) => {
+      // Update driver's socket ID for direct communication
+      Driver.findByIdAndUpdate(driverId, { socketId: socket.id }).exec();
 
-if (tripId) {
+      socket.on('update-location', async (location: { lat: number; lng: number }) => {
+        if (!location || typeof location.lat !== 'number' || typeof location.lng !== 'number') return;
+        console.log('driver has updated his location to', location.lat, location.lng)
+        await Driver.findByIdAndUpdate(driverId, {
+          location: { type: 'Point', coordinates: [location.lng, location.lat] }
+        });
+      });
 
-socket.join(tripId);
+    } else if (decoded.role === 'user') {
+      socket.on('joinRideRoom', (tripId: string) => {
+        if (tripId) {
+          const roomName = `trip-${tripId}`; // Use consistent room naming
+          socket.join(roomName);
+          console.log(`User ${decoded.id} joined room: ${roomName}`);
+        }
+      });
+    }
 
-console.log(`Socket ${socket.id} se ha unido a la sala del viaje: ${tripId}`);
+    // 3. Handle disconnect logic for authenticated users
+  socket.on('disconnect', () => {
+        console.log(`Socket ${socket} with role '${socket.data.role}' disconnected.`);
+        
+        // --- MODIFICATION 2: Check the role before querying the database ---
+        const token = socket.handshake.auth.token;
+        if (!token) {
+          console.log(`Socket ${socket.id} disconnected: No token provided.`);
+          return socket.disconnect();
+        }
+        const decoded = jwt.verify(token, JWT_SECRET) as JwtPayload;
 
-}
+        if (decoded.role === 'driver') {
+          Driver.findOneAndUpdate(
+            { socketId: socket.id, isAvailable: true },
+            { isAvailable: false, socketId: null },
+            { new: true } 
+          )
+          .then(driver => {
+            if (driver) {
+              console.log(`Driver ${driver.name} was set to offline due to disconnection.`);
+            }
+          })
+          .catch(err => {
+            console.error('Error updating driver status on disconnect:', err);
+          });
+        }
+  });
 
+  } catch (error) {
+    console.log(`Socket ${socket.id} auth failed, disconnecting:`, error.message);
+    socket.disconnect();
+  }
 });
 
-
-
-const token = socket.handshake.auth.token;
-
-if (!token) {
-
-console.log('Intento de conexión de socket sin token. Desconectando...');
-
-return socket.disconnect();
-
-}
-
-
-try {
-
-const decoded = jwt.verify(token, process.env.JWT_SECRET as string) as { id: string, role: string };
-
-
-// --- LÓGICA PARA CONDUCTORES ---
-
-if (decoded.role === 'driver') {
-
-const driverId = decoded.id; // Obtenemos el ID de forma segura desde el token
-
-
-
-// Guardar/actualizar socketId
-
-Driver.findByIdAndUpdate(driverId, { socketId: socket.id }).exec();
-
-console.log(`Driver [${driverId}] conectado con socket [${socket.id}]`);
-
-
-
-// ✅ INICIO: ENDPOINT DE SOCKET PARA ACTUALIZAR UBICACIÓN
-
-socket.on('update-location', async (location: { lat: number; lng: number }) => {
-
-if (!location || typeof location.lat !== 'number' || typeof location.lng !== 'number') {
-
-return; // Ignorar si los datos de ubicación no son válidos
-
-}
-
-
-// Actualizamos la ubicación del conductor autenticado en esta conexión
-
-await Driver.findByIdAndUpdate(driverId, {
-
-location: {
-
-type: 'Point',
-
-coordinates: [location.lng, location.lat]
-
-}
-
-});
-
-console.log(`Ubicación actualizada para el conductor ${driverId}`);
-
-});
-
-// ✅ FIN: ENDPOINT DE SOCKET
-
-
-
-// Limpiar socketId al desconectar
-
-socket.on('disconnect', () => {
-
-console.log(`Driver [${driverId}] desconectado.`);
-
-Driver.findByIdAndUpdate(driverId, { socketId: undefined }).exec();
-
-});
-
-}
-
-
-
-// --- LÓGICA PARA PASAJEROS ---
-
-if (decoded.role === 'user') {
-
-socket.on('joinRideRoom', (rideId: string) => {
-
-socket.join(rideId);
-
-console.log(`Pasajero ${decoded.id} se unió a la sala del viaje ${rideId}`);
-
-});
-
-}
-
-
-
-} catch (error) {
-
-console.log('Autenticación de socket fallida. Desconectando...');
-
-socket.disconnect();
-
-}
-
-});
-
-
+// --- API Routes and Server Start ---
 app.use('/api', createApiRoutes(io));
 
-
-
 const PORT = process.env.PORT || 3000;
-
 server.listen(PORT, () => {
-
-console.log(`Servidor corriendo en el puerto ${PORT}`);
-
+  console.log(`Server running on port ${PORT}`);
 });

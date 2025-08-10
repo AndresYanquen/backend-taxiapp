@@ -157,52 +157,64 @@ export const createApiRoutes = (io: Server) => {
         console.error('Error al solicitar el viaje:', error);
         res.status(500).send({ error: 'Ocurrió un error al procesar la solicitud.' });
     }
-});
+    });
 
     // Solo un 'driver' puede aceptar un viaje.
     router.post('/trips/:tripId/accept', protect(['driver']), async (req: AuthenticatedRequest, res: Response) => {
-    const session = await mongoose.startSession();
-    session.startTransaction();
-    try {
-        const { tripId } = req.params;
-        const driverId = req.user!.id;
+        const session = await mongoose.startSession();
+        session.startTransaction();
+        try {
+            const { tripId } = req.params;
+            const driverId = req.user!.id;
 
-        // Cancela el temporizador de auto-cancelación porque un conductor aceptó
-        if (tripTimers.has(tripId)) {
-            clearTimeout(tripTimers.get(tripId)!);
-            tripTimers.delete(tripId);
-            console.log(`Temporizador para el viaje ${tripId} ha sido cancelado.`);
+            if (tripTimers.has(tripId)) {
+                clearTimeout(tripTimers.get(tripId)!);
+                tripTimers.delete(tripId);
+                console.log(`Temporizador para el viaje ${tripId} ha sido cancelado.`);
+            }
+
+            const trip = await Trip.findById(tripId).session(session);
+            if (!trip || trip.status !== 'REQUESTED') {
+                throw new Error('Viaje no encontrado o ya no está disponible.');
+            }
+
+            trip.driverId = new mongoose.Types.ObjectId(driverId);
+            trip.status = 'ACCEPTED';
+            await trip.save({ session });
+
+            const driver = await Driver.findByIdAndUpdate(
+                driverId, 
+                { isAvailable: false }, 
+                { new: true, session }
+            ).select('-password');
+
+            if (!driver){
+                throw new Error('No se pudo encontrar al conductor');
+            }
+
+            if (driver && driver.socketId) {
+                const roomName = `trip-${tripId}`;
+                const driverSocket = io.sockets.sockets.get(driver.socketId);
+                    if (driverSocket) {
+                        driverSocket.join(roomName);
+                        console.log(`Driver ${driverId} forcibly joined to room ${roomName}`);
+                    }
+            }
+            await session.commitTransaction();
+
+            // ✅ CORRECTION: Send the event to the correct room name.
+            io.to(`trip-${tripId}`).emit('trip-accepted', {trip, driver});
+            
+            io.emit('trip-unavailable', { tripId });
+
+            res.status(200).send(trip);
+        } catch (error: any) {
+            await session.abortTransaction();
+            res.status(500).send({ error: error.message || 'Ocurrió un error al aceptar el viaje.' });
+        } finally {
+            session.endSession();
         }
-
-        const trip = await Trip.findById(tripId).session(session);
-        if (!trip || trip.status !== 'REQUESTED') {
-            throw new Error('Viaje no encontrado o ya no está disponible.');
-        }
-
-        // Asigna el conductor y actualiza el estado del viaje
-        trip.driverId = new mongoose.Types.ObjectId(driverId);
-        trip.status = 'ACCEPTED';
-        await trip.save({ session });
-
-        // Marca al conductor como no disponible
-        await Driver.findByIdAndUpdate(driverId, { isAvailable: false }, { new: true, session });
-        await session.commitTransaction();
-
-        // --- CORRECCIÓN ---
-        // Envía el evento 'trip-accepted' solo a la sala del viaje específico.
-        io.to(tripId).emit('trip-accepted', trip);
-        
-        // Emite un evento global para que otros conductores sepan que el viaje ya no está disponible.
-        io.emit('trip-unavailable', { tripId });
-
-        res.status(200).send(trip);
-    } catch (error: any) {
-        await session.abortTransaction();
-        res.status(500).send({ error: error.message || 'Ocurrió un error al aceptar el viaje.' });
-    } finally {
-        session.endSession();
-    }
-});
+    });
 
     // Solo un 'driver' puede iniciar el viaje.
     router.post('/trips/:tripId/start', protect(['driver']), async (req: Request, res: Response) => {
@@ -222,7 +234,9 @@ export const createApiRoutes = (io: Server) => {
 
         // --- CORRECCIÓN ---
         // Notifica el inicio del viaje solo a la sala específica.
-        io.to(tripId).emit('trip-updated', trip);
+        // io.to(tripId).emit('trip-updated', trip);
+        io.to(`trip-${tripId}`).emit('trip-updated', trip);
+
         
         res.status(200).send(trip);
     } catch (error: any) {
@@ -252,7 +266,8 @@ export const createApiRoutes = (io: Server) => {
 
         // --- CORRECCIÓN ---
         // Notifica la finalización del viaje solo a la sala específica.
-        io.to(tripId).emit('trip-updated', trip);
+        io.to(`trip-${tripId}`).emit('trip-updated', trip);
+
         
         res.status(200).send(trip);
     } catch (error: any) {
@@ -262,74 +277,61 @@ export const createApiRoutes = (io: Server) => {
 
     // Tanto 'user' como 'driver' pueden cancelar.
     router.post('/trips/:tripId/cancel', protect(['user', 'driver']), async (req: AuthenticatedRequest, res: Response) => {
-    const session = await mongoose.startSession();
-    session.startTransaction();
-    try {
-        const { tripId } = req.params;
-        const cancellerRole = req.user!.role; // 'user' o 'driver'
-        const cancellerId = req.user!.id;
+        const session = await mongoose.startSession();
+        session.startTransaction();
+        try {
+            const { tripId } = req.params;
+            const cancellerRole = req.user!.role;
+            const cancellerId = req.user!.id;
 
-        const trip = await Trip.findById(tripId).session(session);
+            const trip = await Trip.findById(tripId).session(session);
 
-        if (!trip) {
-            throw new Error('Viaje no encontrado.');
-        }
-
-        if (trip.status !== 'REQUESTED' && trip.status !== 'ACCEPTED') {
-            throw new Error('Este viaje ya no puede ser cancelado.');
-        }
-
-        // Limpia el temporizador de auto-cancelación si existe
-        if (tripTimers.has(tripId)) {
-            clearTimeout(tripTimers.get(tripId)!);
-            tripTimers.delete(tripId);
-        }
-
-        const originalStatus = trip.status;
-        trip.status = 'CANCELLED';
-        trip.cancelledBy = cancellerRole as 'user' | 'driver';
-
-        // --- LÓGICA DE SANCIÓN ---
-        const CANCELLATION_FEE = 5000; // Tarifa de 5000 COP
-        const GRACE_PERIOD_MS = 2 * 60 * 1000; // 2 minutos
-
-        // 1. Si el PASAJERO cancela un viaje YA ACEPTADO
-        if (cancellerRole === 'user' && originalStatus === 'ACCEPTED') {
-            const timeSinceAccepted = Date.now() - new Date(trip.updatedAt).getTime();
-            
-            // Si cancela después del periodo de gracia, se aplica la tarifa
-            if (timeSinceAccepted > GRACE_PERIOD_MS) {
-                trip.cancellationFee = CANCELLATION_FEE;
-                console.log(`Aplicada tarifa de cancelación de ${CANCELLATION_FEE} al pasajero ${trip.riderId}.`);
-                // Aquí podrías integrar la lógica de cobro con una pasarela de pagos
+            if (!trip) {
+                throw new Error('Viaje no encontrado.');
             }
+            if (trip.status !== 'REQUESTED' && trip.status !== 'ACCEPTED') {
+                throw new Error('Este viaje ya no puede ser cancelado.');
+            }
+
+            if (tripTimers.has(tripId)) {
+                clearTimeout(tripTimers.get(tripId)!);
+                tripTimers.delete(tripId);
+            }
+
+            const originalStatus = trip.status;
+            trip.status = 'CANCELLED';
+            trip.cancelledBy = cancellerRole as 'user' | 'driver';
+
+            const CANCELLATION_FEE = 5000;
+            const GRACE_PERIOD_MS = 2 * 60 * 1000;
+
+            if (cancellerRole === 'user' && originalStatus === 'ACCEPTED') {
+                const timeSinceAccepted = Date.now() - new Date(trip.updatedAt).getTime();
+                if (timeSinceAccepted > GRACE_PERIOD_MS) {
+                    trip.cancellationFee = CANCELLATION_FEE;
+                }
+            }
+
+            if (originalStatus === 'ACCEPTED' && trip.driverId) {
+                await Driver.findByIdAndUpdate(trip.driverId, { isAvailable: true }, { session });
+            }
+            
+            await trip.save({ session });
+            
+            const roomName = `trip-${tripId}`;
+            console.log(`Attempting to emit 'trip-updated' to room: ${roomName}`);
+            io.to(`trip-${tripId}`).emit('trip-updated', trip);
+            
+            await session.commitTransaction();
+            res.status(200).send(trip);
+
+        } catch (error: any) {
+            await session.abortTransaction();
+            res.status(500).send({ error: error.message || 'Error al cancelar el viaje.' });
+        } finally {
+            session.endSession();
         }
-
-        // 2. Si el CONDUCTOR cancela un viaje YA ACEPTADO
-        if (cancellerRole === 'driver' && originalStatus === 'ACCEPTED') {
-            console.log(`Conductor ${trip.driverId} ha cancelado un viaje aceptado. Registrar penalización.`);
-            // Aquí podrías implementar la lógica de penalización al conductor
-            // (ej. suspenderlo temporalmente)
-        }
-
-        // Si el viaje estaba aceptado, el conductor debe volver a estar disponible
-        if (originalStatus === 'ACCEPTED' && trip.driverId) {
-            await Driver.findByIdAndUpdate(trip.driverId, { isAvailable: true }, { session });
-        }
-        
-        await trip.save({ session });
-        await session.commitTransaction();
-
-        io.emit('trip-updated', trip); // Notifica a todos sobre la cancelación y la posible tarifa
-        res.status(200).send(trip);
-
-    } catch (error: any) {
-        await session.abortTransaction();
-        res.status(500).send({ error: error.message || 'Error al cancelar el viaje.' });
-    } finally {
-        session.endSession();
-    }
-});
+    });
 
     router.patch('/drivers/availability', protect(['driver']), async (req: AuthenticatedRequest, res: Response) => {
     try {
@@ -387,6 +389,34 @@ export const createApiRoutes = (io: Server) => {
         } catch (error: any) {
             console.error('Error al verificar el viaje activo del conductor:', error);
             res.status(500).send({ error: 'Ocurrió un error en el servidor.' });
+        }
+    });
+
+
+    // In api.routes.ts
+
+// Gets the current driver's profile and any active trip
+    router.get('/drivers/me', protect(['driver']), async (req, res) => {
+        try {
+            const driverId = req.user!.id;
+            
+            // Find the driver's main profile
+            const driver = await Driver.findById(driverId);
+            if (!driver) {
+                return res.status(404).send({ error: 'Driver not found.' });
+            }
+
+            // Find any active trip for that driver
+            const activeTrip = await Trip.findOne({
+                driverId: driverId,
+                status: { $in: ['ACCEPTED', 'IN_PROGRESS'] }
+            });
+
+            // Send both pieces of information back
+            res.status(200).send({ driver, activeTrip });
+
+        } catch (error: any) {
+            res.status(500).send({ error: 'Server error.' });
         }
     });
 
@@ -482,6 +512,24 @@ export const createApiRoutes = (io: Server) => {
         // 5. Handle errors from the external API (e.g., invalid key, rate limits)
         console.error('LocationIQ reverse geocoding error:', error.response?.data || error.message);
         res.status(500).send({ error: 'An error occurred while fetching the address.' });
+    }
+});
+
+router.post('/drivers/go-offline', async (req: Request, res: Response) => {
+    const { driverId } = req.body;
+
+    if (!driverId) {
+        return res.status(400).send({ error: 'driverId is required.' });
+    }
+
+    try {
+        await Driver.findByIdAndUpdate(driverId, { isAvailable: false });
+        // Send a 204 No Content response as we don't need to return data
+        res.status(204).send();
+    } catch (error: any) {
+        // We can't do much if this fails, but we can log it
+        console.error('Error in /go-offline endpoint:', error);
+        res.status(500).send({ error: 'Server error while setting driver offline.' });
     }
 });
 
