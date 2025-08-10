@@ -28,11 +28,12 @@ export const createApiRoutes = (io: Server) => {
     // --- Rutas de Conductores ---
 
     // La búsqueda de conductores ahora requiere que un 'user' (pasajero) esté logueado.
-    router.get('/drivers/nearby', protect(['user']), async (req: Request, res: Response) => {
+    router.get('/drivers/nearby', protect(['user']), async (req: AuthenticatedRequest, res: Response) : Promise<void> => {
         try {
             const { lat, lng } = req.query;
             if (!lat || !lng) {
-                return res.status(400).send({ error: 'Se requieren latitud y longitud.' });
+                res.status(400).send({ error: 'Se requieren latitud y longitud.' });
+                return;
             }
             const maxDistance = 5000;
             const drivers = await Driver.find({
@@ -48,16 +49,18 @@ export const createApiRoutes = (io: Server) => {
                 isAvailable: true
             });
             res.send(drivers);
+            return;
         } catch (error: any) {
             console.error('Error al buscar conductores cercanos:', error);
             res.status(500).send({ error: 'Ocurrió un error al buscar conductores.' });
+            return;
         }
     });
 
     // --- Rutas de Viajes ---
 
     // Solo un 'user' (pasajero) puede solicitar un viaje.
-    router.post('/trips/request', protect(['user']), async (req: AuthenticatedRequest, res: Response) => {
+    router.post('/trips/request', protect(['user']), async (req: AuthenticatedRequest, res: Response) : Promise<void> => {
     try {
         const riderId = req.user!.id;
 
@@ -68,9 +71,10 @@ export const createApiRoutes = (io: Server) => {
         });
 
         if (existingTrip) {
-            return res.status(409).send({
+            res.status(409).send({
                 error: 'Ya tienes un viaje en curso.'
             });
+            return;
         }
 
         const {
@@ -90,7 +94,8 @@ export const createApiRoutes = (io: Server) => {
             pickupLocation.coordinates.length !== 2
         ) {
             // Si no cumple la estructura, rechaza la solicitud.
-            return res.status(400).send({ error: 'El formato de la ubicación de recogida es inválido.' });
+            res.status(400).send({ error: 'El formato de la ubicación de recogida es inválido.' });
+            return;
         }
         // --- FIN DE LA VALIDACIÓN CORREGIDA ---
 
@@ -152,10 +157,12 @@ export const createApiRoutes = (io: Server) => {
         }
 
         res.status(201).send(newTrip);
+        return
 
     } catch (error: any) {
         console.error('Error al solicitar el viaje:', error);
-        res.status(500).send({ error: 'Ocurrió un error al procesar la solicitud.' });
+        res.status(500).send({ error: 'Ocurrió un error al procesar la solicitud' });
+        return;
     }
     });
 
@@ -178,7 +185,7 @@ export const createApiRoutes = (io: Server) => {
                 throw new Error('Viaje no encontrado o ya no está disponible.');
             }
 
-            trip.driverId = new mongoose.Types.ObjectId(driverId);
+            trip.driverId = new mongoose.Types.ObjectId(driverId);;
             trip.status = 'ACCEPTED';
             await trip.save({ session });
 
@@ -217,16 +224,18 @@ export const createApiRoutes = (io: Server) => {
     });
 
     // Solo un 'driver' puede iniciar el viaje.
-    router.post('/trips/:tripId/start', protect(['driver']), async (req: Request, res: Response) => {
+    router.post('/trips/:tripId/start', protect(['driver']), async (req: AuthenticatedRequest, res: Response) : Promise<void> => {
     try {
         const { tripId } = req.params;
         const trip = await Trip.findById(tripId);
 
         if (!trip) {
-            return res.status(404).send({ error: 'Viaje no encontrado.' });
+            res.status(404).send({ error: 'Viaje no encontrado.' });
+            return;
         }
         if (trip.status !== 'ACCEPTED') {
-            return res.status(400).send({ error: 'El viaje no ha sido aceptado.' });
+            res.status(400).send({ error: 'El viaje no ha sido aceptado.' });
+            return;
         }
 
         trip.status = 'IN_PROGRESS';
@@ -245,16 +254,18 @@ export const createApiRoutes = (io: Server) => {
     });
 
     // Solo un 'driver' puede completar el viaje.
-    router.post('/trips/:tripId/complete', protect(['driver']), async (req: Request, res: Response) => {
+    router.post('/trips/:tripId/complete', protect(['driver']), async (req: Request, res: Response) : Promise<void> => {
     try {
         const { tripId } = req.params;
         const trip = await Trip.findById(tripId);
 
         if (!trip) {
-            return res.status(404).send({ error: 'Viaje no encontrado.' });
+            res.status(404).send({ error: 'Viaje no encontrado.' });
+            return;
         }
         if (trip.status !== 'IN_PROGRESS') {
-            return res.status(400).send({ error: 'El viaje no está en progreso.' });
+            res.status(400).send({ error: 'El viaje no está en progreso.' });
+            return;
         }
 
         trip.status = 'COMPLETED';
@@ -333,14 +344,15 @@ export const createApiRoutes = (io: Server) => {
         }
     });
 
-    router.patch('/drivers/availability', protect(['driver']), async (req: AuthenticatedRequest, res: Response) => {
+    router.patch('/drivers/availability', protect(['driver']), async (req: AuthenticatedRequest, res: Response) : Promise<void> =>{
     try {
         const driverId = req.user!.id;
         const { isAvailable } = req.body;
 
         // Validación de la entrada
         if (typeof isAvailable !== 'boolean') {
-            return res.status(400).send({ error: 'El campo "isAvailable" debe ser un valor booleano (true o false).' });
+            res.status(400).send({ error: 'El campo "isAvailable" debe ser un valor booleano (true o false).' });
+            return
         }
 
         // No permitir que un conductor se ponga disponible si está en un viaje activo
@@ -351,7 +363,8 @@ export const createApiRoutes = (io: Server) => {
             });
 
             if (activeTrip) {
-                return res.status(400).send({ error: 'No puedes ponerte disponible mientras estás en un viaje activo.' });
+                res.status(400).send({ error: 'No puedes ponerte disponible mientras estás en un viaje activo.' });
+                return
             }
         }
 
@@ -362,7 +375,8 @@ export const createApiRoutes = (io: Server) => {
         ).select('-password'); // Excluir la contraseña de la respuesta
 
         if (!updatedDriver) {
-            return res.status(404).send({ error: 'Conductor no encontrado.' });
+            res.status(404).send({ error: 'Conductor no encontrado.' });
+            return 
         }
 
         console.log(`El conductor ${driverId} ha actualizado su disponibilidad a: ${isAvailable}`);
@@ -396,14 +410,15 @@ export const createApiRoutes = (io: Server) => {
     // In api.routes.ts
 
 // Gets the current driver's profile and any active trip
-    router.get('/drivers/me', protect(['driver']), async (req, res) => {
+    router.get('/drivers/me', protect(['driver']), async (req: AuthenticatedRequest, res: Response) : Promise<void> => {
         try {
             const driverId = req.user!.id;
             
             // Find the driver's main profile
             const driver = await Driver.findById(driverId);
             if (!driver) {
-                return res.status(404).send({ error: 'Driver not found.' });
+                res.status(404).send({ error: 'Driver not found.' });
+                return 
             }
 
             // Find any active trip for that driver
@@ -480,19 +495,21 @@ export const createApiRoutes = (io: Server) => {
         }
     });
 
-    router.get('/location/reverse-geocode', protect(['user']), async (req: Request, res: Response) => {
+    router.get('/location/reverse-geocode', protect(['user']), async (req: AuthenticatedRequest, res: Response) : Promise<void> =>{
     const { lat, lng } = req.query;
 
     // 1. Validate input from the client
     if (!lat || !lng) {
-        return res.status(400).send({ error: 'Latitude and longitude are required query parameters.' });
+        res.status(400).send({ error: 'Latitude and longitude are required query parameters.' });
+        return;
     }
 
     // 2. Securely get the API key from environment variables
     const apiKey = process.env.LOCATION_IQ_API_KEY;
     if (!apiKey) {
         console.error('FATAL: LOCATIONIQ_API_KEY is not defined in the environment variables.');
-        return res.status(500).send({ error: 'Server configuration error.' });
+        res.status(500).send({ error: 'Server configuration error.' });
+        return;
     }
 
     const url = `${process.env.LOCATION_IQ_URL}/reverse.php?key=${apiKey}&lat=${lat}&lon=${lng}&format=json`;
@@ -504,22 +521,25 @@ export const createApiRoutes = (io: Server) => {
         // 4. Check for a valid response and send the address back
         if (response.data && response.data.display_name) {
             res.status(200).send({ address: response.data.display_name });
+            return;
         } else {
             // This case handles when LocationIQ returns a 200 OK but can't find an address
             res.status(404).send({ error: 'Address not found for the provided coordinates.' });
+            return;
         }
     } catch (error: any) {
         // 5. Handle errors from the external API (e.g., invalid key, rate limits)
         console.error('LocationIQ reverse geocoding error:', error.response?.data || error.message);
         res.status(500).send({ error: 'An error occurred while fetching the address.' });
+        return;
     }
 });
 
-router.post('/drivers/go-offline', async (req: Request, res: Response) => {
+router.post('/drivers/go-offline', async (req: Request, res: Response): Promise<void> => {
     const { driverId } = req.body;
 
     if (!driverId) {
-        return res.status(400).send({ error: 'driverId is required.' });
+        res.status(400).send({ error: 'driverId is required.' });
     }
 
     try {

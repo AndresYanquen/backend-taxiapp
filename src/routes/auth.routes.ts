@@ -20,17 +20,19 @@ const generateToken = (id: string, role: 'user' | 'driver') => {
  * @desc    Registrar un nuevo pasajero
  * @body    { "name": "string", "email": "string", "password": "string" }
  */
-router.post('/register/user', async (req: Request, res: Response) => {
+router.post('/register/user', async (req: Request, res: Response): Promise<void> => {
     try {
         const { name, email, password, phoneNumber } = req.body;
 
         if (!name || !email || !password || !phoneNumber) {
-            return res.status(400).send({ error: 'Todos los campos son requeridos.' });
+            res.status(400).send({ error: 'Todos los campos son requeridos.' });
+            return
         }
 
         let user = await User.findOne({ email });
         if (user) {
-            return res.status(400).send({ error: 'El correo electrónico ya está en uso.' });
+            res.status(400).send({ error: 'El correo electrónico ya está en uso.' });
+            return
         }
 
         const salt = await bcrypt.genSalt(10);
@@ -53,14 +55,15 @@ router.post('/register/user', async (req: Request, res: Response) => {
  * @body    { "name": "string", "email": "string", "password": "string", "location": { "lat": number, "lng": number } }
  */
 // In your /register/driver endpoint
-router.post('/register/driver', async (req: Request, res: Response) => {
+router.post('/register/driver', async (req: Request, res: Response): Promise<void> => {
     try {
         // Note: 'location' is removed from required fields
         const { name, email, password, phoneNumber } = req.body;
 
         // Adjust the validation
         if (!name || !email || !password || !phoneNumber) {
-            return res.status(400).send({ error: 'Todos los campos son requeridos.', data: req.body });
+            res.status(400).send({ error: 'Todos los campos son requeridos.', data: req.body });
+            return
         }
 
         // ... existing logic to check for user, hash password ...
@@ -94,17 +97,18 @@ router.post('/register/driver', async (req: Request, res: Response) => {
  * @body    { "email": "string", "password": "string", "role": "user" | "driver" }
  */
 // A better login endpoint
-router.post('/login', async (req: Request, res: Response) => {
+router.post('/login', async (req: Request, res: Response): Promise<void> => {
     try {
         const { email, password } = req.body; // No 'role' from the request
 
         if (!email || !password) {
-            return res.status(400).send({ error: 'Email and password are required.' });
+            res.status(400).send({ error: 'Email and password are required.' });
+            return;
         }
 
         // 1. First, check if they are a regular user (rider)
         let account = await User.findOne({ email }).select('+password');
-        let role = 'user'; // Assume 'user' role first
+        let role : 'user' | 'driver' = 'user'; // Assume 'user' role first
 
         // 2. If not found as a user, check if they are a driver
         if (!account) {
@@ -114,13 +118,15 @@ router.post('/login', async (req: Request, res: Response) => {
 
         // 3. If not found in either collection, the credentials are bad
         if (!account) {
-            return res.status(401).send({ error: 'Invalid credentials.' });
+            res.status(401).send({ error: 'Invalid credentials.' });
+            return;
         }
 
         // 4. Now, compare the password for the found account
         const isMatch = await bcrypt.compare(password, account.password);
         if (!isMatch) {
-            return res.status(401).send({ error: 'Invalid credentials.' });
+            res.status(401).send({ error: 'Invalid credentials.' });
+            return
         }
 
         // 5. Generate a token with the role the backend discovered

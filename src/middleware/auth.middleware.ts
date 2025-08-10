@@ -23,7 +23,8 @@ export const protect = (roles?: ('user' | 'driver')[]) => {
 
                 // Comprobamos si el rol del token está permitido para esta ruta
                 if (roles && !roles.includes(decoded.role as 'user' | 'driver')) {
-                    return res.status(403).json({ error: 'No tienes permiso para realizar esta acción.' });
+                    res.status(403).json({ error: 'No tienes permiso para realizar esta acción.' });
+                    return;
                 }
 
                 // Adjuntamos los datos del usuario a la petición para usarlo en las rutas
@@ -33,11 +34,13 @@ export const protect = (roles?: ('user' | 'driver')[]) => {
             } catch (error) {
                 console.error(error);
                 res.status(401).json({ error: 'Token no válido o expirado.' });
+                return;
             }
         }
 
         if (!token) {
             res.status(401).json({ error: 'No autorizado, no se encontró un token.' });
+            return;
         }
     };
 };

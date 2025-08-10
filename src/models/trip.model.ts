@@ -1,4 +1,4 @@
-import { Schema, model, Document } from 'mongoose';
+import mongoose, { Schema, model, Document } from 'mongoose';
 
 // Interfaz para la estructura de un punto GeoJSON
 interface IPoint {
@@ -7,8 +7,8 @@ interface IPoint {
 }
 
 export interface ITrip extends Document {
-  riderId: Schema.Types.ObjectId; // Estandarizado a ObjectId
-  driverId: Schema.Types.ObjectId | null;
+  riderId: mongoose.Types.ObjectId; // Estandarizado a ObjectId
+  driverId: mongoose.Types.ObjectId | null;
   pickupLocation: IPoint; // Usando GeoJSON
   dropoffLocation: IPoint; // Usando GeoJSON
   pickupName: string | null;
