@@ -1,15 +1,17 @@
 import { Router, Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
+import jwt, { Secret } from 'jsonwebtoken';
 import User from '../models/user.model';
 import Driver from '../models/driver.model';
 
 const router = Router();
 
 // --- FUNCIÓN AUXILIAR PARA GENERAR TOKENS ---
-const generateToken = (id: string, role: 'user' | 'driver') => {
-    return jwt.sign({ id, role }, process.env.JWT_SECRET!, {
-        expiresIn: '30d', // El token expirará en 30 días
+const generateToken = (id: string, role: 'user' | 'driver', name: string, expireTime: string = '1d' ) => {
+    const payload = { id, role, name };
+    const secretKey : Secret = process.env.JWT_SECRET!;
+    return jwt.sign(payload, secretKey, {
+        expiresIn: expireTime,
     });
 };
 
@@ -41,7 +43,7 @@ router.post('/register/user', async (req: Request, res: Response): Promise<void>
         user = new User({ name, email, password: hashedPassword });
         await user.save();
 
-        const token = generateToken(user.id, 'user');
+        const token = generateToken(user.id, 'user', user.name);
         res.status(201).send({ token, role: 'user' });
 
     } catch (error: any) {
@@ -80,7 +82,7 @@ router.post('/register/driver', async (req: Request, res: Response): Promise<voi
         });
         await driver.save();
 
-        const token = generateToken(driver.id, 'driver');
+        const token = generateToken(driver.id, 'driver', driver.name);
         res.status(201).send({ token, role: 'driver' });
 
     } catch (error: any) {
@@ -129,8 +131,10 @@ router.post('/login', async (req: Request, res: Response): Promise<void> => {
             return
         }
 
+        const name = account.name;
+
         // 5. Generate a token with the role the backend discovered
-        const token = generateToken(account.id, role);
+        const token = generateToken(account.id, role, name);
         res.status(200).send({ token, role }); // You can also send the role back
 
     } catch (error: any) {

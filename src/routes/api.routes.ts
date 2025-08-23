@@ -1,11 +1,3 @@
-/*
-* =================================================================
-* ARCHIVO ACTUALIZADO Y COMPLETO: src/routes/api.routes.ts
-* =================================================================
-* Este es el archivo de rutas completo con el middleware `protect`
-* aplicado y la lógica de creación de viajes actualizada.
-*/
-
 import { Router, Request, Response } from 'express';
 import { Server } from 'socket.io';
 import mongoose from 'mongoose';
@@ -35,7 +27,17 @@ export const createApiRoutes = (io: Server) => {
                 res.status(400).send({ error: 'Se requieren latitud y longitud.' });
                 return;
             }
-            const maxDistance = 5000;
+        
+            let maxDistance = 5000; 
+
+            // 2. Leemos el parámetro opcional 'maxDistance' del query string.
+            const customDistance = req.query.maxDistance as string;
+
+            // 3. Si el parámetro existe y es un número válido, lo usamos.
+            if (customDistance && !isNaN(parseFloat(customDistance))) {
+                // parseFloat convierte el texto del query a un número.
+                maxDistance = parseFloat(customDistance); 
+            }
             const drivers = await Driver.find({
                 location: {
                     $near: {
@@ -46,7 +48,8 @@ export const createApiRoutes = (io: Server) => {
                         $maxDistance: maxDistance
                     }
                 },
-                isAvailable: true
+                isAvailable: true,
+                status: 'active'
             });
             res.send(drivers);
             return;
@@ -78,22 +81,27 @@ export const createApiRoutes = (io: Server) => {
         }
 
         const {
-            pickupLocation, // Este es el objeto GeoJSON
+            pickupLocation,
             dropoffLocation,
             pickupName,
             destinationName,
-            userIndications
+            userIndications,
+            paymentMethodId,
+            vehicleTypeRequested,
+            maxDistance = 5000 // <-- 1. Valor por defecto en la desestructuración
         } = req.body;
 
-        // --- INICIO DE LA VALIDACIÓN CORREGIDA ---
-        // 2. Validar que 'pickupLocation' tenga el formato GeoJSON esperado.
+        if (typeof maxDistance !== 'number' || maxDistance <= 0) {
+            res.status(400).send({ error: 'El parámetro maxDistance debe ser un número positivo.' });
+            return;
+        }
+
         if (
             !pickupLocation ||
             pickupLocation.type !== 'Point' ||
             !Array.isArray(pickupLocation.coordinates) ||
             pickupLocation.coordinates.length !== 2
         ) {
-            // Si no cumple la estructura, rechaza la solicitud.
             res.status(400).send({ error: 'El formato de la ubicación de recogida es inválido.' });
             return;
         }
@@ -146,7 +154,7 @@ export const createApiRoutes = (io: Server) => {
             location: {
                 $near: {
                     $geometry: { type: 'Point', coordinates: [longitude, latitude] },
-                    $maxDistance: 5000 // 5km
+                    $maxDistance: maxDistance // 5km
                 }
             },
             isAvailable: true
@@ -193,7 +201,7 @@ export const createApiRoutes = (io: Server) => {
                 driverId, 
                 { isAvailable: false }, 
                 { new: true, session }
-            ).select('-password');
+            ).where({status: 'active'}).select('-password');
 
             if (!driver){
                 throw new Error('No se pudo encontrar al conductor');
@@ -227,18 +235,28 @@ export const createApiRoutes = (io: Server) => {
     router.post('/trips/:tripId/start', protect(['driver']), async (req: AuthenticatedRequest, res: Response) : Promise<void> => {
     try {
         const { tripId } = req.params;
+        const driverId = req.user!.id;
+
         const trip = await Trip.findById(tripId);
 
         if (!trip) {
             res.status(404).send({ error: 'Viaje no encontrado.' });
             return;
         }
+
+        if (trip.driverId?.toString() !== driverId) {
+            res.status(403).send({ error: 'No tienes permiso para iniciar este viaje.' });
+            return
+        }
+
         if (trip.status !== 'ACCEPTED') {
             res.status(400).send({ error: 'El viaje no ha sido aceptado.' });
             return;
         }
 
+
         trip.status = 'IN_PROGRESS';
+        trip.tripStartTime = new Date();
         await trip.save();
 
         // --- CORRECCIÓN ---
@@ -257,15 +275,29 @@ export const createApiRoutes = (io: Server) => {
     router.post('/trips/:tripId/complete', protect(['driver']), async (req: Request, res: Response) : Promise<void> => {
     try {
         const { tripId } = req.params;
+        const driverId = req.user!.id;
+
         const trip = await Trip.findById(tripId);
 
         if (!trip) {
             res.status(404).send({ error: 'Viaje no encontrado.' });
             return;
         }
+
+        if (trip.driverId?.toString() !== driverId) {
+            res.status(403).send({ error: 'No tienes permiso para completar este viaje.' });
+            return;
+        }
+
         if (trip.status !== 'IN_PROGRESS') {
             res.status(400).send({ error: 'El viaje no está en progreso.' });
             return;
+        }
+
+        trip.tripEndTime = new Date();
+
+        if (trip.tripStartTime) {
+            trip.duration = (trip.tripEndTime.getTime() - trip.tripStartTime.getTime()) / 1000;
         }
 
         trip.status = 'COMPLETED';
@@ -300,6 +332,14 @@ export const createApiRoutes = (io: Server) => {
             if (!trip) {
                 throw new Error('Viaje no encontrado.');
             }
+
+            if (cancellerRole === 'user' && trip.riderId.toString() !== cancellerId) {
+                throw new Error('No tienes permiso para cancelar este viaje.');
+            }
+            if (cancellerRole === 'driver' && trip.driverId?.toString() !== cancellerId) {
+                throw new Error('No tienes permiso para cancelar este viaje.');
+            }
+
             if (trip.status !== 'REQUESTED' && trip.status !== 'ACCEPTED') {
                 throw new Error('Este viaje ya no puede ser cancelado.');
             }
@@ -368,10 +408,15 @@ export const createApiRoutes = (io: Server) => {
             }
         }
 
-        const updatedDriver = await Driver.findByIdAndUpdate(
-            driverId,
+       const updatedDriver = await Driver.findOneAndUpdate(
+            // Condición: El ID debe coincidir Y el estado debe ser 'active'.
+            { _id: driverId, status: 'active' }, 
+            
+            // Actualización: El nuevo valor de isAvailable.
             { isAvailable: isAvailable },
-            { new: true } // Devuelve el documento actualizado
+
+            // Opciones: Devuelve el documento actualizado.
+            { new: true } 
         ).select('-password'); // Excluir la contraseña de la respuesta
 
         if (!updatedDriver) {
@@ -415,7 +460,7 @@ export const createApiRoutes = (io: Server) => {
             const driverId = req.user!.id;
             
             // Find the driver's main profile
-            const driver = await Driver.findById(driverId);
+            const driver = await Driver.findById(driverId).select('-password');
             if (!driver) {
                 res.status(404).send({ error: 'Driver not found.' });
                 return 
@@ -425,7 +470,7 @@ export const createApiRoutes = (io: Server) => {
             const activeTrip = await Trip.findOne({
                 driverId: driverId,
                 status: { $in: ['ACCEPTED', 'IN_PROGRESS'] }
-            });
+            }).populate('riderId', 'firstName lastName profileImageUrl averageRating');
 
             // Send both pieces of information back
             res.status(200).send({ driver, activeTrip });
@@ -435,15 +480,27 @@ export const createApiRoutes = (io: Server) => {
         }
     });
 
-        router.get('/trips/history/passenger', protect(['user']), async (req: AuthenticatedRequest, res: Response) => {
+    router.get('/trips/history/passenger', protect(['user']), async (req: AuthenticatedRequest, res: Response) => {
         try {
             const passengerId = req.user!.id;
 
-            const trips = await Trip.find({ riderId: passengerId })
-                .populate('driverId', 'name') // Trae el nombre del conductor relacionado
-                .sort({ createdAt: -1 }); // Ordena los viajes del más reciente al más antiguo
+            const page = parseInt(req.query.page as string, 10) || 1;
+            const limit = parseInt(req.query.limit as string, 10) || 10; // Por defecto, 10 viajes por página.
+            const skip = (page - 1) * limit;
 
-            res.status(200).send(trips);
+            const trips = await Trip.find({ riderId: passengerId })
+                .populate('driverId', 'firstName lastName') // Trae el nombre del conductor relacionado
+                .sort({ createdAt: -1 })
+                .skip(skip)   // <-- Se salta los resultados de las páginas anteriores
+                .limit(limit); ; // Ordena los viajes del más reciente al más antiguo
+
+            const totalTrips = await Trip.countDocuments({ riderId: passengerId });
+
+            res.status(200).send({
+                totalPages: Math.ceil(totalTrips / limit),
+                currentPage: page,
+                trips
+            });
 
         } catch (error: any) {
             console.error('Error al obtener el historial del pasajero:', error);
@@ -459,12 +516,23 @@ export const createApiRoutes = (io: Server) => {
     router.get('/trips/history/driver', protect(['driver']), async (req: AuthenticatedRequest, res: Response) => {
         try {
             const driverId = req.user!.id;
+            const page = parseInt(req.query.page as string, 10) || 1;
+            const limit = parseInt(req.query.limit as string, 10) || 10;
+            const skip = (page - 1) * limit;
 
             const trips = await Trip.find({ driverId: driverId })
-                .populate('riderId', 'name') // Trae el nombre del pasajero relacionado
-                .sort({ createdAt: -1 }); // Ordena los viajes del más reciente al más antiguo
+                .populate('riderId', 'firstName lastName') // Trae el nombre del pasajero relacionado
+                .sort({ createdAt: -1 })
+                .skip(skip)
+                .limit(limit);; // Ordena los viajes del más reciente al más antiguo
 
-            res.status(200).send(trips);
+                    const totalTrips = await Trip.countDocuments({ driverId: driverId });
+
+            res.status(200).send({
+                totalPages: Math.ceil(totalTrips / limit),
+                currentPage: page,
+                trips
+            });
 
         } catch (error: any) {
             console.error('Error al obtener el historial del conductor:', error);
@@ -484,7 +552,7 @@ export const createApiRoutes = (io: Server) => {
             // Use .populate() to include the driver's data, including their location
             .populate({
                 path: 'driverId',
-                select: 'name car location' // Specify the fields you need
+                select: 'firstName lastName car location' // Specify the fields you need
             });
 
             res.status(200).send(activeTrip);
@@ -496,62 +564,70 @@ export const createApiRoutes = (io: Server) => {
     });
 
     router.get('/location/reverse-geocode', protect(['user']), async (req: AuthenticatedRequest, res: Response) : Promise<void> =>{
-    const { lat, lng } = req.query;
+        const { lat, lng } = req.query;
 
-    // 1. Validate input from the client
-    if (!lat || !lng) {
-        res.status(400).send({ error: 'Latitude and longitude are required query parameters.' });
-        return;
-    }
-
-    // 2. Securely get the API key from environment variables
-    const apiKey = process.env.LOCATION_IQ_API_KEY;
-    if (!apiKey) {
-        console.error('FATAL: LOCATIONIQ_API_KEY is not defined in the environment variables.');
-        res.status(500).send({ error: 'Server configuration error.' });
-        return;
-    }
-
-    const url = `${process.env.LOCATION_IQ_URL}/reverse.php?key=${apiKey}&lat=${lat}&lon=${lng}&format=json`;
-
-    try {
-        // 3. Make the external API call to LocationIQ
-        const response = await axios.get(url);
-
-        // 4. Check for a valid response and send the address back
-        if (response.data && response.data.display_name) {
-            res.status(200).send({ address: response.data.display_name });
-            return;
-        } else {
-            // This case handles when LocationIQ returns a 200 OK but can't find an address
-            res.status(404).send({ error: 'Address not found for the provided coordinates.' });
+        // 1. Validate input from the client
+        if (!lat || !lng) {
+            res.status(400).send({ error: 'Latitude and longitude are required query parameters.' });
             return;
         }
-    } catch (error: any) {
-        // 5. Handle errors from the external API (e.g., invalid key, rate limits)
-        console.error('LocationIQ reverse geocoding error:', error.response?.data || error.message);
-        res.status(500).send({ error: 'An error occurred while fetching the address.' });
-        return;
-    }
-});
 
-router.post('/drivers/go-offline', async (req: Request, res: Response): Promise<void> => {
-    const { driverId } = req.body;
+        const latNum = parseFloat(lat as string);
+        const lngNum = parseFloat(lng as string);
 
-    if (!driverId) {
-        res.status(400).send({ error: 'driverId is required.' });
-    }
+        if (isNaN(latNum) || isNaN(lngNum)) {
+            res.status(400).send({ error: 'Latitude and longitude must be valid numbers.' });
+            return;
+        }
 
-    try {
-        await Driver.findByIdAndUpdate(driverId, { isAvailable: false });
-        // Send a 204 No Content response as we don't need to return data
-        res.status(204).send();
-    } catch (error: any) {
-        // We can't do much if this fails, but we can log it
-        console.error('Error in /go-offline endpoint:', error);
-        res.status(500).send({ error: 'Server error while setting driver offline.' });
-    }
-});
+        // 2. Securely get the API key from environment variables
+        const apiKey = process.env.LOCATION_IQ_API_KEY;
+        if (!apiKey) {
+            console.error('FATAL: LOCATIONIQ_API_KEY is not defined in the environment variables.');
+            res.status(500).send({ error: 'Server configuration error.' });
+            return;
+        }
+
+        const url = `${process.env.LOCATION_IQ_URL}/reverse.php?key=${apiKey}&lat=${lat}&lon=${lng}&format=json`;
+
+        try {
+            // 3. Make the external API call to LocationIQ
+            const response = await axios.get(url);
+
+            // 4. Check for a valid response and send the address back
+            if (response.data && response.data.display_name) {
+                res.status(200).send({ address: response.data.display_name });
+                return;
+            } else {
+                // This case handles when LocationIQ returns a 200 OK but can't find an address
+                res.status(404).send({ error: 'Address not found for the provided coordinates.' });
+                return;
+            }
+        } catch (error: any) {
+            // 5. Handle errors from the external API (e.g., invalid key, rate limits)
+            console.error('LocationIQ reverse geocoding error:', error.response?.data || error.message);
+            res.status(500).send({ error: 'An error occurred while fetching the address.' });
+            return;
+        }
+    });
+
+    router.post('/drivers/go-offline', protect(['driver']) , async (req: Request, res: Response): Promise<void> => {
+        const { driverId } = req.body;
+
+        if (!driverId) {
+            res.status(400).send({ error: 'driverId is required.' });
+        }
+
+        try {
+            await Driver.findByIdAndUpdate(driverId, { isAvailable: false });
+            // Send a 204 No Content response as we don't need to return data
+            res.status(204).send();
+        } catch (error: any) {
+            // We can't do much if this fails, but we can log it
+            console.error('Error in /go-offline endpoint:', error);
+            res.status(500).send({ error: 'Server error while setting driver offline.' });
+        }
+    });
 
     return router;
 };
