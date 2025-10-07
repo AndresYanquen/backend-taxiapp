@@ -24,11 +24,23 @@ const generateToken = (id: string, role: 'user' | 'driver', name: string, expire
  */
 router.post('/register/user', async (req: Request, res: Response): Promise<void> => {
     try {
-        const { name, email, password, phoneNumber } = req.body;
+        const { firstName, lastName, email, password, phoneNumber } = req.body;
 
-        if (!name || !email || !password || !phoneNumber) {
-            res.status(400).send({ error: 'Todos los campos son requeridos.' });
-            return
+        const requiredFields = ['firstName', 'lastName', 'email', 'password', 'phoneNumber'];
+        const missingFields = [];
+
+        for (const field of requiredFields) {
+            if (!req.body[field]) {
+                missingFields.push(field);
+            }
+        }
+
+        if (missingFields.length > 0) {
+            // Si hay campos faltantes, devuelve un error con la lista de ellos.
+            res.status(400).send({ 
+                error: `Los siguientes campos son requeridos: ${missingFields.join(', ')}` 
+            });
+            return;
         }
 
         let user = await User.findOne({ email });
@@ -40,14 +52,20 @@ router.post('/register/user', async (req: Request, res: Response): Promise<void>
         const salt = await bcrypt.genSalt(10);
         const hashedPassword = await bcrypt.hash(password, salt);
 
-        user = new User({ name, email, password: hashedPassword });
+        user = new User({
+            firstName,
+            lastName,
+            email,
+            password: hashedPassword,
+            phoneNumber // Make sure phoneNumber is saved
+        });
         await user.save();
 
-        const token = generateToken(user.id, 'user', user.name);
+        const token = generateToken(user.id, 'user', `${user.firstName} ${user.lastName}`);
         res.status(201).send({ token, role: 'user' });
 
-    } catch (error: any) {
-        res.status(500).send({ error: 'Error en el servidor al registrar usuario.' });
+    } catch (errorCatch: any) {
+        res.status(500).send({ error: 'Error en el servidor al registrar usuario:' + errorCatch });
     }
 });
 
@@ -60,29 +78,47 @@ router.post('/register/user', async (req: Request, res: Response): Promise<void>
 router.post('/register/driver', async (req: Request, res: Response): Promise<void> => {
     try {
         // Note: 'location' is removed from required fields
-        const { name, email, password, phoneNumber } = req.body;
+        const { firstName, lastName, email, password, phoneNumber } = req.body;
+
 
         // Adjust the validation
-        if (!name || !email || !password || !phoneNumber) {
-            res.status(400).send({ error: 'Todos los campos son requeridos.', data: req.body });
-            return
+        const requiredFields = ['firstName', 'lastName', 'email', 'password', 'phoneNumber'];
+        const missingFields = [];
+
+        for (const field of requiredFields) {
+            if (!req.body[field]) {
+                missingFields.push(field);
+            }
         }
 
-        // ... existing logic to check for user, hash password ...
+        if (missingFields.length > 0) {
+            // Si hay campos faltantes, devuelve un error con la lista de ellos.
+            res.status(400).send({ 
+                error: `Los siguientes campos son requeridos: ${missingFields.join(', ')}` 
+            });
+            return;
+        }
+
+        let driver = await Driver.findOne({ email });
+        if (driver) {
+            res.status(400).send({ error: 'El correo electrónico ya está en uso.' });
+            return;
+        }
+
          const salt = await bcrypt.genSalt(10);
          const hashedPassword = await bcrypt.hash(password, salt);
 
         // Create the driver without a location initially
-        const driver = new Driver({
-            name: name, // Match frontend field name
+        driver = new Driver({
+            firstName,
+            lastName,
             email,
             password: hashedPassword,
-            phoneNumber, // Add this field
-            // Location is not set here
+            phoneNumber,
         });
         await driver.save();
 
-        const token = generateToken(driver.id, 'driver', driver.name);
+        const token = generateToken(driver.id, 'driver', `${driver.firstName} ${driver.lastName}`);
         res.status(201).send({ token, role: 'driver' });
 
     } catch (error: any) {
@@ -131,7 +167,7 @@ router.post('/login', async (req: Request, res: Response): Promise<void> => {
             return
         }
 
-        const name = account.name;
+        const name = account.firstName;
 
         // 5. Generate a token with the role the backend discovered
         const token = generateToken(account.id, role, name);

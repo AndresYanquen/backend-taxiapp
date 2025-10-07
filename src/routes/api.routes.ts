@@ -3,6 +3,7 @@ import { Server } from 'socket.io';
 import mongoose from 'mongoose';
 import Trip from '../models/trip.model';
 import Driver from '../models/driver.model';
+import User from '../models/user.model'
 import { protect } from '../middleware/auth.middleware';
 import axios from 'axios'
 
@@ -20,158 +21,171 @@ export const createApiRoutes = (io: Server) => {
     // --- Rutas de Conductores ---
 
     // La búsqueda de conductores ahora requiere que un 'user' (pasajero) esté logueado.
-    router.get('/drivers/nearby', protect(['user']), async (req: AuthenticatedRequest, res: Response) : Promise<void> => {
+router.get(
+  '/drivers/nearby',
+  protect(['user']),
+  async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    try {
+      const { lat, lng, maxDistance } = req.query;
+
+      // Validate coordinates
+      if (!lat || !lng) {
+        res.status(400).json({ error: 'Se requieren latitud y longitud.' });
+        return;
+      }
+
+      // Parse values
+      const latitude = parseFloat(lat as string);
+      const longitude = parseFloat(lng as string);
+      if (isNaN(latitude) || isNaN(longitude)) {
+        res.status(400).json({ error: 'Latitud o longitud no válidas.' });
+        return;
+      }
+
+      // Parse and validate distance
+      let distance = 10000; // default 10km
+      if (maxDistance && !isNaN(parseFloat(maxDistance as string))) {
+        distance = parseFloat(maxDistance as string);
+      }
+
+      // Query nearby drivers
+      const drivers = await Driver.find({
+        location: {
+          $near: {
+            $geometry: {
+              type: 'Point',
+              coordinates: [longitude, latitude],
+            },
+            $maxDistance: distance,
+          },
+        },
+        isAvailable: true,
+        // status: 'active',
+      });
+
+      res.json(drivers);
+    } catch (error) {
+      console.error('Error al buscar conductores cercanos:', error);
+      res.status(500).json({ error: 'Ocurrió un error al buscar conductores.' });
+    }
+  }
+);
+
+
+    // --- Rutas de Viajes ---
+
+    // Solo un 'user' (pasajero) puede solicitar un viaje.
+    router.post('/trips/request', protect(['user']), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
         try {
-            const { lat, lng } = req.query;
-            if (!lat || !lng) {
-                res.status(400).send({ error: 'Se requieren latitud y longitud.' });
+            const riderId = req.user!.id;
+
+            // --- 1. Verificación del estado del usuario ---
+            const rider = await User.findById(riderId);
+            if (!rider || rider.status !== 'active') {
+                res.status(403).send({ error: 'Tu cuenta no está activa.' });
                 return;
             }
-        
-            let maxDistance = 5000; 
 
-            // 2. Leemos el parámetro opcional 'maxDistance' del query string.
-            const customDistance = req.query.maxDistance as string;
-
-            // 3. Si el parámetro existe y es un número válido, lo usamos.
-            if (customDistance && !isNaN(parseFloat(customDistance))) {
-                // parseFloat convierte el texto del query a un número.
-                maxDistance = parseFloat(customDistance); 
+            // --- 2. Verificación de viaje duplicado ---
+            const existingTrip = await Trip.findOne({
+                riderId: riderId,
+                status: { $in: ['REQUESTED', 'ACCEPTED', 'IN_PROGRESS'] }
+            });
+            if (existingTrip) {
+                res.status(409).send({ error: 'Ya tienes un viaje en curso.' });
+                return
             }
-            const drivers = await Driver.find({
+
+            // --- 3. Desestructuración y validación de datos de entrada ---
+            const {
+                pickupLocation,
+                dropoffLocation,
+                pickupName,
+                destinationName,
+                userIndications,
+                paymentMethodId = 'tests',
+                vehicleTypeRequested = 'standard',
+                maxDistance = 5000
+            } = req.body;
+
+            if (!pickupLocation || !dropoffLocation || !paymentMethodId || !vehicleTypeRequested) {
+                res.status(400).send({ error: 'Faltan datos requeridos (ubicaciones, método de pago o tipo de vehículo).' });
+                return;
+            }
+            if (typeof maxDistance !== 'number' || maxDistance <= 0) {
+                res.status(400).send({ error: 'El parámetro maxDistance debe ser un número positivo.' });
+                return;
+            }
+            // (Tu validación de GeoJSON es correcta y puede permanecer aquí si lo deseas)
+
+
+            // --- 4. BÚSQUEDA DE CONDUCTORES (ANTES DE CREAR EL VIAJE) ---
+            const [longitude, latitude] = pickupLocation.coordinates;
+            const nearbyDrivers = await Driver.find({
                 location: {
                     $near: {
-                        $geometry: {
-                            type: 'Point',
-                            coordinates: [parseFloat(lng as string), parseFloat(lat as string)]
-                        },
+                        $geometry: { type: 'Point', coordinates: [longitude, latitude] },
                         $maxDistance: maxDistance
                     }
                 },
                 isAvailable: true,
                 status: 'active'
             });
-            res.send(drivers);
-            return;
-        } catch (error: any) {
-            console.error('Error al buscar conductores cercanos:', error);
-            res.status(500).send({ error: 'Ocurrió un error al buscar conductores.' });
-            return;
-        }
-    });
 
-    // --- Rutas de Viajes ---
+            // Si no hay conductores, se rechaza la solicitud y no se crea el viaje.
+            if (nearbyDrivers.length === 0) {
+                res.status(404).send({ error: 'No se encontraron conductores cercanos. Inténtalo de nuevo en un momento.' });
+                return
+            }
 
-    // Solo un 'user' (pasajero) puede solicitar un viaje.
-    router.post('/trips/request', protect(['user']), async (req: AuthenticatedRequest, res: Response) : Promise<void> => {
-    try {
-        const riderId = req.user!.id;
+            const estimatedFare = 15000; 
 
-        // 1. Verificación de viaje duplicado (sin cambios)
-        const existingTrip = await Trip.findOne({
-            riderId: riderId,
-            status: { $in: ['REQUESTED', 'ACCEPTED', 'IN_PROGRESS'] }
-        });
-
-        if (existingTrip) {
-            res.status(409).send({
-                error: 'Ya tienes un viaje en curso.'
+            const newTrip = new Trip({
+                riderId,
+                pickupLocation,
+                dropoffLocation,
+                pickupName,
+                destinationName,
+                userIndications,
+                paymentMethodId,
+                vehicleTypeRequested,
+                estimatedFare,
+                status: 'REQUESTED'
             });
-            return;
-        }
 
-        const {
-            pickupLocation,
-            dropoffLocation,
-            pickupName,
-            destinationName,
-            userIndications,
-            paymentMethodId,
-            vehicleTypeRequested,
-            maxDistance = 5000 // <-- 1. Valor por defecto en la desestructuración
-        } = req.body;
+            await newTrip.save();
 
-        if (typeof maxDistance !== 'number' || maxDistance <= 0) {
-            res.status(400).send({ error: 'El parámetro maxDistance debe ser un número positivo.' });
-            return;
-        }
-
-        if (
-            !pickupLocation ||
-            pickupLocation.type !== 'Point' ||
-            !Array.isArray(pickupLocation.coordinates) ||
-            pickupLocation.coordinates.length !== 2
-        ) {
-            res.status(400).send({ error: 'El formato de la ubicación de recogida es inválido.' });
-            return;
-        }
-        // --- FIN DE LA VALIDACIÓN CORREGIDA ---
-
-        // 3. Proceder con la creación del viaje
-        const newTrip = new Trip({
-            riderId,
-            pickupLocation, // Guarda el objeto GeoJSON completo
-            dropoffLocation,
-            pickupName,
-            destinationName,
-            userIndications,
-            status: 'REQUESTED'
-        });
-
-        await newTrip.save();
-
-        const tripId = newTrip._id.toString();
+            // --- 6. Notificación y temporizador de cancelación ---
+            io.emit('new-trip-request', newTrip);
+            
+            // (Tu lógica de temporizador es excelente y permanece aquí)
+            const tripId = newTrip._id.toString();
             const CANCELLATION_TIMEOUT = 60000; // 60 segundos
-
             const timer = setTimeout(async () => {
                 try {
                     const trip = await Trip.findById(tripId);
-                    // Solo cancela si nadie lo ha aceptado aún
                     if (trip && trip.status === 'REQUESTED') {
                         trip.status = 'CANCELLED';
                         await trip.save();
-                        console.log(`Viaje ${tripId} cancelado automáticamente por falta de respuesta.`);
-
-                        // Notifica al pasajero que su viaje fue cancelado
+                        console.log(`Viaje ${tripId} cancelado automáticamente.`);
                         io.to(`trip-${tripId}`).emit('trip-updated', trip);
-
-                        // Notifica a los conductores que la solicitud ya no está disponible
                         io.emit('trip-unavailable', { tripId });
                     }
                 } catch (timeoutError) {
-                    console.error('Error en el timeout de cancelación del viaje:', timeoutError);
+                    console.error('Error en el timeout de cancelación:', timeoutError);
                 }
-                // Limpia el temporizador del Map una vez que se ha ejecutado
                 tripTimers.delete(tripId);
             }, CANCELLATION_TIMEOUT);
-
-            // Guarda la referencia al temporizador
             tripTimers.set(tripId, timer);
 
-        // 4. Buscar conductores cercanos usando las coordenadas
-        const [longitude, latitude] = pickupLocation.coordinates;
-        const nearbyDrivers = await Driver.find({
-            location: {
-                $near: {
-                    $geometry: { type: 'Point', coordinates: [longitude, latitude] },
-                    $maxDistance: maxDistance // 5km
-                }
-            },
-            isAvailable: true
-        });
 
-        if (nearbyDrivers.length > 0) {
-            io.emit('new-trip-request', newTrip);
+            // --- 7. Respuesta al cliente ---
+            res.status(201).send(newTrip);
+
+        } catch (error: any) {
+            console.error('Error al solicitar el viaje:', error);
+            res.status(500).send({ error: 'Ocurrió un error al procesar la solicitud.' });
         }
-
-        res.status(201).send(newTrip);
-        return
-
-    } catch (error: any) {
-        console.error('Error al solicitar el viaje:', error);
-        res.status(500).send({ error: 'Ocurrió un error al procesar la solicitud' });
-        return;
-    }
     });
 
     // Solo un 'driver' puede aceptar un viaje.
@@ -408,16 +422,13 @@ export const createApiRoutes = (io: Server) => {
             }
         }
 
-       const updatedDriver = await Driver.findOneAndUpdate(
-            // Condición: El ID debe coincidir Y el estado debe ser 'active'.
-            { _id: driverId, status: 'active' }, 
-            
-            // Actualización: El nuevo valor de isAvailable.
+        const updatedDriver = await Driver.findByIdAndUpdate(
+            driverId,
             { isAvailable: isAvailable },
-
-            // Opciones: Devuelve el documento actualizado.
-            { new: true } 
-        ).select('-password'); // Excluir la contraseña de la respuesta
+            { new: true } // Devuelve el documento actualizado
+        ).select('-password'); 
+        
+        
 
         if (!updatedDriver) {
             res.status(404).send({ error: 'Conductor no encontrado.' });
