@@ -1,6 +1,7 @@
 
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
+import { httpErrors } from '../utils/httpErrors';
 
 // Extendemos la interfaz Request de Express para añadir nuestra propia propiedad `user`
 interface AuthenticatedRequest extends Request {
@@ -23,7 +24,12 @@ export const protect = (roles?: ('user' | 'driver')[]) => {
 
                 // Comprobamos si el rol del token está permitido para esta ruta
                 if (roles && !roles.includes(decoded.role as 'user' | 'driver')) {
-                    res.status(403).json({ error: 'No tienes permiso para realizar esta acción.' });
+                    next(
+                        httpErrors.forbidden('No tienes permiso para realizar esta acción.', {
+                            requiredRoles: roles,
+                            currentRole: decoded.role,
+                        })
+                    );
                     return;
                 }
 
@@ -32,14 +38,17 @@ export const protect = (roles?: ('user' | 'driver')[]) => {
                 next(); // El token es válido y el rol es correcto, continuamos
 
             } catch (error) {
-                console.error(error);
-                res.status(401).json({ error: 'Token no válido o expirado.' });
+                next(
+                    httpErrors.unauthorized('Token no válido o expirado.', {
+                        reason: error instanceof Error ? error.message : String(error),
+                    })
+                );
                 return;
             }
         }
 
         if (!token) {
-            res.status(401).json({ error: 'No autorizado, no se encontró un token.' });
+            next(httpErrors.unauthorized('No autorizado, no se encontró un token.'));
             return;
         }
     };

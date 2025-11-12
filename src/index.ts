@@ -8,6 +8,7 @@ import { connectDB } from './config/database';
 import { createApiRoutes } from './routes/api.routes';
 import authRoutes from './routes/auth.routes';
 import Driver from './models/driver.model';
+import { errorHandler, notFoundHandler } from './middleware/error.middleware';
 
 // --- Environment and Database Setup ---
 dotenv.config();
@@ -111,7 +112,8 @@ io.on('connection', (socket) => {
           )
           .then(driver => {
             if (driver) {
-              console.log(`Driver ${driver.name} was set to offline due to disconnection.`);
+              const identifier = driver.firstName || driver.email || driver.id;
+              console.log(`Driver ${identifier} was set to offline due to disconnection.`);
             }
           })
           .catch(err => {
@@ -128,6 +130,8 @@ io.on('connection', (socket) => {
 
 // --- API Routes and Server Start ---
 app.use('/api', createApiRoutes(io));
+app.use(notFoundHandler);
+app.use(errorHandler);
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
