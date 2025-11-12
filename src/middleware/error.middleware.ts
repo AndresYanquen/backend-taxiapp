@@ -26,6 +26,7 @@ export const errorHandler = (err: unknown, req: Request, res: Response, _next: N
 
   res.status(status).json({
     error: httpError.message,
+    detalle: httpError.details ?? null,
     errorId,
   });
 };
