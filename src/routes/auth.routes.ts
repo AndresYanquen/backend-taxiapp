@@ -24,7 +24,7 @@ const generateToken = (
   id: string,
   role: Role,
   name: string,
-  expireTime: number | StringValue = '1d'
+  expireTime: number | StringValue = '7d'
 ) => {
   const payload = { id, role, name };
   const secretKey = process.env.JWT_SECRET;
